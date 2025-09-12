@@ -2,7 +2,6 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  */
-import { GoogleGenAI, Chat } from '@google/genai';
 
 // FIX: Replaced JSDoc @typedef with a TypeScript type alias for better type recognition in a .tsx file.
 type CardId = 'card-home' | 'card-chat' | 'card-tasks' | 'card-notes' | 'card-settings' | 'card-gadgets' | 'card-inbox';
@@ -22,104 +21,233 @@ const CARD_CONFIG = {
 };
 
 /**
- * Manages all AI-related interactions with the GoogleGenAI SDK.
+ * Interface to the backend server. All data and AI interactions go through this object.
  * @namespace
  */
-const AIController = {
-    /** @type {GoogleGenAI | null} */
-    ai: null,
-    /** @type {Chat | null} */
-    chat: null,
+const BackendAPI = {
     isInitialized: false,
-    chatHistoryKey: 'gemini-chat-history',
+    baseUrl: 'http://localhost:3001/api',
+
+    keys: {
+        settings: 'assistant-settings', // For client-side UI settings like theme
+    },
 
     /**
-     * Initializes the GoogleGenAI client and the chat session.
+     * Pings the backend to ensure it's running and initializes the connection.
      * @returns {Promise<void>}
      */
     async initialize() {
         try {
-            const savedHistory = localStorage.getItem(this.chatHistoryKey);
-            const history = savedHistory ? JSON.parse(savedHistory) : [];
-
-            this.ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
-            this.chat = this.ai.chats.create({ model: 'gemini-2.5-flash', history });
+            // Ping the server to check for a connection
+            await this._fetch('/system-status');
             this.isInitialized = true;
-            console.log('AI Controller Initialized with history.');
+            console.log('BackendAPI Connected.');
         } catch (error) {
-            console.error('Failed to initialize AI session:', error);
-            UIManager.showSystemMessageInChat('Could not connect to the assistant. Please check your API key and refresh the page.');
-            // Disable inputs globally
+            console.error('Failed to connect to BackendAPI:', error);
+            UIManager.showSystemMessageInChat('Could not connect to the backend. Please ensure the server is running (e.g., from the `backend` directory, run `npm install` then `npm start`) and refresh the page.');
             document.querySelectorAll('input, button').forEach(el => (el as HTMLInputElement).disabled = true);
         }
     },
-
-    /**
-     * Sends a message to the chat and streams the response.
-     * @param {string} userInput - The user's message.
-     * @param {(chunk: string) => void} onChunk - Callback for each response chunk.
-     * @param {() => boolean} shouldStop - Function to check if generation should stop.
-     * @returns {Promise<void>}
-     */
-    async streamChatMessage(userInput, onChunk, shouldStop) {
-        if (!this.chat) return;
+    
+    // Generic fetch wrapper for API calls
+    async _fetch(endpoint, options = {}) {
         try {
-            // Per request, send the last 5 messages as context.
-            // The `sendMessageStream` function uses the `chat.history` array for context.
-            // We truncate it here to limit the context window.
-            const historyLimit = 5;
-            if (this.chat.history.length > historyLimit) {
-                this.chat.history = this.chat.history.slice(this.chat.history.length - historyLimit);
+            const response = await fetch(`${this.baseUrl}${endpoint}`, {
+                headers: { 'Content-Type': 'application/json' },
+                ...options,
+            });
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(errorData.error || `HTTP error! status: ${response.status}`);
             }
-
-            const result = await this.chat.sendMessageStream({ message: userInput });
-            for await (const chunk of result) {
-                if (shouldStop()) break;
-                onChunk(chunk.text);
+            if (response.status === 204) { // No Content
+                return null;
             }
+            return response.json();
         } catch (error) {
-            console.error('Failed to send message:', error);
-            UIManager.showSystemMessageInChat('Failed to send message. Please try again.');
-            throw error; // Re-throw to allow caller to handle UI state
+            console.error(`API call to ${endpoint} failed:`, error);
+            UIManager.showSystemMessageInChat(`API Error: ${error.message}`);
+            throw error;
+        }
+    },
+
+
+    chat: {
+        /**
+         * Calls the backend to start a streaming chat session.
+         */
+        async stream(userInput, context, template, onChunk, shouldStop) {
+            try {
+                const response = await fetch(`${BackendAPI.baseUrl}/chat/stream`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: userInput, context, template }),
+                });
+
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+
+                while (true) {
+                    if (shouldStop()) {
+                        await reader.cancel();
+                        break;
+                    }
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    
+                    const chunkText = decoder.decode(value);
+                    onChunk(chunkText);
+                }
+
+            } catch (error) {
+                console.error('API Call to /api/chat/stream failed:', error);
+                UIManager.showSystemMessageInChat('Failed to send message. Please try again.');
+                throw error;
+            }
+        },
+        /**
+         * Simulates a call to POST /api/chat/quick-query
+         */
+        async quickQuery(userInput) {
+            try {
+                const data = await BackendAPI._fetch('/quick-query', {
+                    method: 'POST',
+                    body: JSON.stringify({ query: userInput }),
+                });
+                return data; // May contain { response, action }
+            } catch (error) {
+                return { response: 'Sorry, something went wrong with the quick query.' };
+            }
+        },
+        async getHistory() {
+            return BackendAPI._fetch('/chat/history');
+        },
+        async clearHistory() {
+            return BackendAPI._fetch('/chat/history', { method: 'DELETE' });
+        },
+        async suggest(text) {
+            try {
+                 const data = await BackendAPI._fetch('/chat/suggest', {
+                    method: 'POST',
+                    body: JSON.stringify({ text }),
+                });
+                return data.suggestions || [];
+            } catch (error) {
+                return []; // Fail silently
+            }
         }
     },
     
-    /**
-     * Saves the current chat history to localStorage.
-     */
-    saveChatHistory() {
-        if (this.chat) {
-            localStorage.setItem(this.chatHistoryKey, JSON.stringify(this.chat.history));
-        }
-    },
-
-    /**
-     * Clears the chat history from the session and localStorage.
-     */
-    clearChatHistory() {
-        if (this.chat) {
-            this.chat.history = [];
-        }
-        localStorage.removeItem(this.chatHistoryKey);
-        console.log('Chat history cleared.');
-    },
-
-    /**
-     * Performs a one-off content generation for quick access.
-     * @param {string} userInput - The user's prompt.
-     * @returns {Promise<string | null>} The model's response text.
-     */
-    async quickQuery(userInput) {
-        if (!this.ai) return null;
-        try {
-            const response = await this.ai.models.generateContent({
-                model: 'gemini-2.5-flash',
-                contents: userInput,
+    messages: {
+        async list() {
+            return BackendAPI._fetch('/messages');
+        },
+        async create(text) {
+            // Creating a "message" is equivalent to hitting the webhook endpoint
+            return BackendAPI._fetch('/webhook', {
+                method: 'POST',
+                body: JSON.stringify({ message: text }),
             });
-            return response.text;
-        } catch (error) {
-            console.error('Quick access query failed:', error);
-            return 'Sorry, something went wrong.';
+        },
+        async delete(id) {
+            return BackendAPI._fetch(`/messages/${id}`, { method: 'DELETE' });
+        }
+    },
+
+    tasks: {
+        async list() { return BackendAPI._fetch('/tasks'); },
+        async create(title, priority) {
+            return BackendAPI._fetch('/tasks', {
+                method: 'POST',
+                body: JSON.stringify({ title, priority }),
+            });
+        },
+        async update(id, completed) {
+             return BackendAPI._fetch(`/tasks/${id}`, {
+                method: 'PUT',
+                body: JSON.stringify({ completed }),
+            });
+        },
+        async delete(id) {
+             return BackendAPI._fetch(`/tasks/${id}`, { method: 'DELETE' });
+        },
+    },
+
+    notes: {
+        async list() { return BackendAPI._fetch('/notes'); },
+        async create(content) {
+            return BackendAPI._fetch('/notes', {
+                method: 'POST',
+                body: JSON.stringify({ content }),
+            });
+        },
+    },
+    
+    // New APIs for Phase 3
+    widgets: {
+        async list() { return BackendAPI._fetch('/widgets'); }
+    },
+
+    expenses: {
+        async list() { return BackendAPI._fetch('/expenses'); },
+        async create(expense) {
+            return BackendAPI._fetch('/expenses', {
+                method: 'POST',
+                body: JSON.stringify(expense),
+            });
+        },
+        async getSummary() { return BackendAPI._fetch('/expenses/summary'); }
+    },
+    
+    system: {
+        async getStatus() { return BackendAPI._fetch('/system-status'); }
+    },
+    
+    activityLog: {
+        async list() { return BackendAPI._fetch('/activity-log'); }
+    },
+
+
+    settings: {
+        async get() {
+            const settingsData = localStorage.getItem(BackendAPI.keys.settings);
+            const parsedData = settingsData ? JSON.parse(settingsData) : {};
+            return {
+                theme: parsedData.theme || 'dark',
+                persistentContext: parsedData.persistentContext || '',
+                templates: parsedData.templates || [],
+                apiKeys: parsedData.apiKeys || [],
+            };
+        },
+        async update(newSettings) {
+            const currentSettings = await this.get();
+            const updatedSettings = { ...currentSettings, ...newSettings };
+            localStorage.setItem(BackendAPI.keys.settings, JSON.stringify(updatedSettings));
+            return { success: true };
+        }
+    },
+    
+    apiKeys: {
+        async list() {
+            const settings = await BackendAPI.settings.get();
+            return settings.apiKeys;
+        },
+        async create(name, value) {
+            const settings = await BackendAPI.settings.get();
+            const newKey = { id: `key-${Date.now()}`, name, value };
+            const updatedKeys = [...settings.apiKeys, newKey];
+            await BackendAPI.settings.update({ apiKeys: updatedKeys });
+            return newKey;
+        },
+        async delete(id) {
+            const settings = await BackendAPI.settings.get();
+            const updatedKeys = settings.apiKeys.filter(key => key.id !== id);
+            await BackendAPI.settings.update({ apiKeys: updatedKeys });
+            return { success: true };
         }
     }
 };
@@ -405,7 +533,7 @@ const UIManager = {
     
             item.addEventListener('click', () => {
                 this.closeQuickSwitch();
-                this.openCard(cardId, 'primary', { isBackNavigation: false });
+                this.openCard(cardId as CardId, 'primary', { isBackNavigation: false });
             });
             this.elements.quickSwitchContainer.appendChild(item);
         });
@@ -620,8 +748,14 @@ const UIManager = {
             case 'card-tasks':
                 TasksApp.initialize(cardEl);
                 break;
+            case 'card-notes':
+                NotesApp.initialize(cardEl);
+                break;
             case 'card-home':
                 HomeApp.initialize(cardEl);
+                break;
+            case 'card-gadgets':
+                GadgetsApp.initialize(cardEl);
                 break;
         }
     },
@@ -636,8 +770,8 @@ const UIManager = {
             const messageEl = document.createElement('div');
             messageEl.className = 'message system';
             messageEl.innerHTML = `<p>${text}</p>`;
-            chatLog.appendChild(messageEl);
-            chatLog.scrollTop = chatLog.scrollHeight;
+            // Prepend for column-reverse
+            chatLog.prepend(messageEl);
         }
     },
 
@@ -703,29 +837,29 @@ const HomeApp = {
         const quickAccessResponse = container.querySelector('#quick-access-response');
         const quickAccessText = container.querySelector('#quick-access-text');
         const goToChatBtn = container.querySelector('#go-to-chat-btn');
-        let quickAccessConversation = null;
 
         quickAccessForm?.addEventListener('submit', async (e) => {
             e.preventDefault();
             const userInput = quickAccessInput.value.trim();
-            if (!userInput || !AIController.isInitialized) return;
+            if (!userInput || !BackendAPI.isInitialized) return;
             
             quickAccessInput.disabled = true;
             quickAccessText.textContent = 'Thinking...';
+            
+            const modelResponse = await BackendAPI.chat.quickQuery(userInput);
+            
+            quickAccessText.textContent = modelResponse.response;
             quickAccessResponse.classList.add('active');
-            
-            const modelResponse = await AIController.quickQuery(userInput);
-            
-            quickAccessText.textContent = modelResponse;
-            quickAccessConversation = { userInput, modelResponse };
-            quickAccessForm.style.display = 'none';
+            quickAccessForm.style.display = 'none'; // Hide form after response
             quickAccessInput.disabled = false;
-            quickAccessInput.value = '';
+            
+            // Handle intelligent actions from backend
+            if (modelResponse.action?.type === 'openCard') {
+                UIManager.openCard(modelResponse.action.cardId, 'primary', { isBackNavigation: false });
+            }
         });
 
         goToChatBtn?.addEventListener('click', () => {
-             // We need to pass the conversation to the chat app somehow if it opens
-             // This is a more advanced state management problem. For now, just open chat.
              UIManager.openCard('card-chat', 'primary', { isBackNavigation: false });
         });
 
@@ -763,32 +897,33 @@ const ChatApp = {
         templates: [],
         activeTemplateId: null,
         persistentContext: '',
+        suggestionTimeout: null,
     },
-    keys: {
-        templates: 'chat-format-templates',
-        context: 'chat-persistent-context',
-    },
-
+    
     /**
      * @param {HTMLElement} container - The card element.
      */
-    initialize(container) {
+    async initialize(container) {
         const chatLog = container.querySelector('#chat-log');
         const chatForm = container.querySelector('#chat-form');
         const chatInput = container.querySelector('#chat-input') as HTMLTextAreaElement;
         const sendButton = container.querySelector('#send-btn') as HTMLButtonElement;
         const stopButton = container.querySelector('#stop-btn') as HTMLButtonElement;
         const settingsBtn = container.querySelector('#chat-settings-btn') as HTMLButtonElement;
+        const suggestionsContainer = container.querySelector('#chat-suggestions-container') as HTMLElement;
+        const micBtn = container.querySelector('#mic-btn');
         
         if (!chatLog || !chatForm || !chatInput || !sendButton || !stopButton || !settingsBtn) return;
         
         let currentAssistantMessageEl = null;
         let shouldStopGeneration = false;
         
-        this.loadState();
+        const settings = await BackendAPI.settings.get();
+        this.state.templates = settings.templates;
+        this.state.persistentContext = settings.persistentContext;
+        
         this.initializeSettingsModal();
         
-        // --- Message Rendering Logic ---
         const createMessageElement = (sender) => {
             const messageEl = document.createElement('div');
             messageEl.classList.add('message', sender);
@@ -800,27 +935,25 @@ const ChatApp = {
         const appendMessage = (text, sender) => {
             const messageEl = createMessageElement(sender);
             messageEl.querySelector('p').textContent = text;
-            chatLog.appendChild(messageEl);
-            chatLog.scrollTop = chatLog.scrollHeight;
+            chatLog.prepend(messageEl); // Prepend for column-reverse
         };
 
-        // --- History & Menu Setup ---
-        const renderHistory = () => {
+        const renderHistory = async () => {
             chatLog.innerHTML = '';
-            if (!AIController.chat || AIController.chat.history.length === 0) {
+            const history = await BackendAPI.chat.getHistory();
+            if (!history || history.length === 0) {
                  appendMessage("Hello! I'm your live assistant. How can I help you today?", 'assistant');
                  return;
             }
 
-            AIController.chat.history.forEach(msg => {
+            // Reverse history to prepend correctly
+            [...history].reverse().forEach(msg => {
                 const sender = msg.role === 'user' ? 'user' : 'assistant';
-                // The history parts can be multiple, join them.
                 const text = msg.parts.map(part => part.text).join('');
                 appendMessage(text, sender);
             });
         };
 
-        // --- Settings Menu Logic ---
         const gearIcon = document.getElementById('settings-gear-icon')?.cloneNode(true);
         if (gearIcon && !settingsBtn.querySelector('svg')) {
              settingsBtn.appendChild(gearIcon);
@@ -830,14 +963,51 @@ const ChatApp = {
             e.stopPropagation();
             UIManager.showChatSettingsModal();
         });
+
+        micBtn?.addEventListener('click', () => {
+            UIManager.showSystemMessageInChat('Voice input is not implemented yet. It\'s on the list!');
+        });
+        
+        // --- Intelligent Suggestions ---
+        const handleSuggestions = async () => {
+            const text = chatInput.value.trim();
+            if (text.length < 4) {
+                suggestionsContainer.innerHTML = '';
+                return;
+            }
+            const suggestions = await BackendAPI.chat.suggest(text);
+            suggestionsContainer.innerHTML = '';
+            suggestions.forEach(suggestion => {
+                const btn = document.createElement('button');
+                btn.className = 'chat-suggestion-btn';
+                btn.textContent = suggestion.label;
+                btn.onclick = () => {
+                    // Handle different action types
+                    if (suggestion.action.type === 'fill_input') {
+                        chatInput.value = suggestion.action.text;
+                        chatInput.focus();
+                    }
+                    suggestionsContainer.innerHTML = ''; // Clear after use
+                };
+                suggestionsContainer.appendChild(btn);
+            });
+        };
+
+        const debounce = (func, delay) => {
+            return (...args) => {
+                clearTimeout(this.state.suggestionTimeout);
+                this.state.suggestionTimeout = setTimeout(() => func.apply(this, args), delay);
+            };
+        };
+        const debouncedSuggestionHandler = debounce(handleSuggestions, 500);
         
         // --- Chat Message Logic ---
         
         chatInput.addEventListener('input', () => {
             sendButton.disabled = chatInput.value.trim() === '';
-             // Auto-resize textarea
             chatInput.style.height = 'auto';
             chatInput.style.height = `${chatInput.scrollHeight}px`;
+            debouncedSuggestionHandler();
         });
         
         stopButton.addEventListener('click', () => {
@@ -847,67 +1017,51 @@ const ChatApp = {
         chatForm.addEventListener('submit', async (e) => {
             e.preventDefault();
             const userInput = chatInput.value.trim();
-            if (!userInput || !AIController.isInitialized) return;
+            if (!userInput || !BackendAPI.isInitialized) return;
 
             appendMessage(userInput, 'user');
             
-            let finalUserInput = userInput;
-            if (this.state.persistentContext) {
-                finalUserInput = `CONTEXT: "${this.state.persistentContext}"\n\n${finalUserInput}`;
-            }
             const activeTemplate = this.state.templates.find(t => t.id === this.state.activeTemplateId);
-            if (activeTemplate) {
-                 finalUserInput = `TEMPLATE: "${activeTemplate.content}"\n\n${finalUserInput}`;
-            }
             
             chatInput.value = '';
             sendButton.disabled = true;
+            suggestionsContainer.innerHTML = '';
             shouldStopGeneration = false;
             chatForm.classList.add('is-generating');
-
-            // Reset textarea height after sending
             chatInput.style.height = 'auto';
 
             let firstChunk = true;
             currentAssistantMessageEl = createMessageElement('assistant');
             const assistantP = currentAssistantMessageEl.querySelector('p');
-            // Add typing indicator
             assistantP.innerHTML = `<div class="typing-indicator"><span></span><span></span><span></span></div>`;
-            chatLog.appendChild(currentAssistantMessageEl);
-            chatLog.scrollTop = chatLog.scrollHeight;
+            chatLog.prepend(currentAssistantMessageEl);
             
             try {
-                await AIController.streamChatMessage(finalUserInput, (chunk) => {
+                await BackendAPI.chat.stream(userInput, this.state.persistentContext, activeTemplate, (chunk) => {
                     if (firstChunk) {
-                        assistantP.innerHTML = ''; // Clear indicator
+                        assistantP.innerHTML = '';
                         assistantP.textContent = chunk;
                         firstChunk = false;
                     } else {
                         assistantP.textContent += chunk;
                     }
-                    chatLog.scrollTop = chatLog.scrollHeight;
                 }, () => shouldStopGeneration);
 
                 if (shouldStopGeneration) {
-                    if (firstChunk) { // Stopped before any content arrived
+                    if (firstChunk) {
                         currentAssistantMessageEl.remove();
                     }
                     UIManager.showSystemMessageInChat('Response stopped by user.');
-                } else {
-                    // Save history on successful completion
-                    AIController.saveChatHistory();
                 }
             } catch (error) {
-                // Error occurred, remove the indicator bubble
                 currentAssistantMessageEl?.remove();
             } finally {
                 chatForm.classList.remove('is-generating');
                 currentAssistantMessageEl = null;
             }
         });
-
-        // Initial render of history
-        renderHistory();
+        
+        await renderHistory();
     },
 
     initializeSettingsModal() {
@@ -922,18 +1076,18 @@ const ChatApp = {
         closeBtn.addEventListener('click', () => UIManager.hideChatSettingsModal());
         overlay.addEventListener('click', () => UIManager.hideChatSettingsModal());
 
-        clearHistoryBtn.addEventListener('click', () => {
+        clearHistoryBtn.addEventListener('click', async () => {
             if (confirm('Are you sure you want to start a new chat? This will clear the current conversation.')) {
-                AIController.clearChatHistory();
+                await BackendAPI.chat.clearHistory();
                 const chatLog = document.querySelector('#pane-primary #chat-log, #wallet-container .active #chat-log');
                 if (chatLog) chatLog.innerHTML = '<div class="message assistant"><p>Hello! I\'m your live assistant. How can I help you today?</p></div>';
                 UIManager.hideChatSettingsModal();
             }
         });
 
-        downloadDebugBtn.addEventListener('click', () => {
-            const history = AIController.chat?.history.slice(-10) || [];
-            if (history.length === 0) {
+        downloadDebugBtn.addEventListener('click', async () => {
+            const history = await BackendAPI.chat.getHistory();
+            if (!history || history.length === 0) {
                 alert('No history to download.');
                 return;
             }
@@ -966,7 +1120,7 @@ const ChatApp = {
         contextInput.value = this.state.persistentContext;
         contextInput.addEventListener('input', () => {
             this.state.persistentContext = contextInput.value;
-            this.saveState();
+            BackendAPI.settings.update({ persistentContext: this.state.persistentContext });
         });
 
         this.renderTemplates();
@@ -1006,7 +1160,7 @@ const ChatApp = {
     addTemplate(name, content) {
         const newTemplate = { id: `template-${Date.now()}`, name, content };
         this.state.templates.push(newTemplate);
-        this.saveState();
+        BackendAPI.settings.update({ templates: this.state.templates });
         this.renderTemplates();
     },
 
@@ -1015,7 +1169,7 @@ const ChatApp = {
         if (this.state.activeTemplateId === id) {
             this.state.activeTemplateId = null;
         }
-        this.saveState();
+        BackendAPI.settings.update({ templates: this.state.templates });
         this.renderTemplates();
     },
 
@@ -1025,20 +1179,7 @@ const ChatApp = {
         } else {
             this.state.activeTemplateId = id; // Select
         }
-        this.saveState();
         this.renderTemplates();
-    },
-    
-    saveState() {
-        localStorage.setItem(this.keys.templates, JSON.stringify(this.state.templates));
-        localStorage.setItem(this.keys.context, this.state.persistentContext);
-    },
-
-    loadState() {
-        const savedTemplates = localStorage.getItem(this.keys.templates);
-        const savedContext = localStorage.getItem(this.keys.context);
-        this.state.templates = savedTemplates ? JSON.parse(savedTemplates) : [];
-        this.state.persistentContext = savedContext || '';
     }
 };
 
@@ -1047,100 +1188,448 @@ const ChatApp = {
  * @namespace
  */
 const InboxApp = {
-    /** @type {{id: number, text: string}[]} */
-    messages: [],
-
-    initialize(container) {
+    /**
+     * @param {HTMLElement} container - The card element.
+     */
+    async initialize(container) {
         const pasteInput = container.querySelector('#inbox-paste-input') as HTMLTextAreaElement;
         const processBtn = container.querySelector('#inbox-process-btn') as HTMLButtonElement;
         const messageList = container.querySelector('#inbox-message-list');
         
-        processBtn.addEventListener('click', () => {
+        processBtn.addEventListener('click', async () => {
             const text = pasteInput.value.trim();
             if (text) {
-                this.messages.push({ id: Date.now(), text });
-                this.renderMessages(messageList);
+                await BackendAPI.messages.create(text);
+                const messages = await BackendAPI.messages.list();
+                this.renderMessages(messageList as HTMLElement, messages);
                 pasteInput.value = '';
             }
         });
         
-        this.renderMessages(messageList);
+        const initialMessages = await BackendAPI.messages.list();
+        this.renderMessages(messageList as HTMLElement, initialMessages);
     },
     
-    renderMessages(listEl) {
+    renderMessages(listEl, messages) {
         listEl.innerHTML = '';
-        if (this.messages.length === 0) {
+        if (messages.length === 0) {
             listEl.innerHTML = '<li class="no-messages">Paste a conversation to get started.</li>';
             return;
         }
-        this.messages.forEach(msg => {
+        messages.forEach(msg => {
             const item = document.createElement('li');
             item.className = 'inbox-message-item';
             
+            const header = document.createElement('div');
+            header.className = 'inbox-message-header';
+
             const text = document.createElement('p');
             text.textContent = msg.text;
             
             const button = document.createElement('button');
             button.className = 'inbox-generate-reply-btn';
             button.textContent = 'Generate Reply';
-            button.addEventListener('click', () => this.handleGenerate(msg));
+            button.addEventListener('click', () => this.handleGenerate(msg, item));
             
-            item.appendChild(text);
+            header.appendChild(text); // Text is now part of header for layout
+            item.appendChild(header);
             item.appendChild(button);
             listEl.appendChild(item);
         });
     },
     
-    async handleGenerate(message) {
-        const activeTemplate = ChatApp.state.templates.find(t => t.id === ChatApp.state.activeTemplateId);
-        if (!activeTemplate) {
-            alert('Please select a format template from the Chat settings first.');
-            return;
-        }
+    /**
+     * This now calls the backend to generate a reply.
+     */
+    async handleGenerate(message, listItemEl) {
+        const settings = await BackendAPI.settings.get();
+        const activeTemplate = settings.templates.find(t => t.id === ChatApp.state.activeTemplateId);
 
         UIManager.showSystemMessageInChat('Generating reply for inbox message...');
-        let prompt = `Using the template "${activeTemplate.name}", generate a reply for the following customer message.\n\nTEMPLATE INSTRUCTIONS:\n${activeTemplate.content}\n\nCUSTOMER MESSAGE:\n${message.text}`;
         
-        if (ChatApp.state.persistentContext) {
-            prompt = `GENERAL CONTEXT:\n${ChatApp.state.persistentContext}\n\n${prompt}`;
-        }
-        
-        const aiReply = await AIController.quickQuery(prompt);
-        if (aiReply) {
-            UIManager.showConfirmationToast(
-                message.text,
-                aiReply,
-                () => { // onSend
-                    navigator.clipboard.writeText(aiReply).then(() => {
-                        UIManager.showSystemMessageInChat('Reply copied to clipboard!');
-                    });
-                    this.messages = this.messages.filter(m => m.id !== message.id);
-                    const listEl = document.querySelector('#card-inbox #inbox-message-list');
-                    if (listEl) this.renderMessages(listEl as HTMLElement);
-                    UIManager.hideConfirmationToast();
-                },
-                () => { // onCancel
-                    UIManager.hideConfirmationToast();
-                }
-            );
-        } else {
-             UIManager.showSystemMessageInChat('Failed to generate reply.');
+        try {
+            const data = await BackendAPI._fetch('/generate-reply', {
+                method: 'POST',
+                body: JSON.stringify({
+                    message: message.text,
+                    templateId: activeTemplate?.id,
+                    context: settings.persistentContext,
+                }),
+            });
+
+            const aiReply = data.aiResponse;
+
+            // Display emotion tag
+            if (data.emotion) {
+                listItemEl.dataset.emotion = data.emotion;
+                const header = listItemEl.querySelector('.inbox-message-header');
+                // Remove old tag if it exists
+                header.querySelector('.emotion-tag')?.remove();
+                
+                const emotionTag = document.createElement('span');
+                emotionTag.className = `emotion-tag ${data.emotion}`;
+                emotionTag.textContent = data.emotion;
+                header.appendChild(emotionTag);
+            }
+
+            if (aiReply) {
+                UIManager.showConfirmationToast(
+                    message.text,
+                    aiReply,
+                    async () => { // onSend
+                        navigator.clipboard.writeText(aiReply).then(() => {
+                            UIManager.showSystemMessageInChat('Reply copied to clipboard!');
+                        });
+                        await BackendAPI.messages.delete(message.id);
+                        const listEl = document.querySelector('#card-inbox #inbox-message-list');
+                        if (listEl) {
+                            const updatedMessages = await BackendAPI.messages.list();
+                            this.renderMessages(listEl as HTMLElement, updatedMessages);
+                        }
+                        UIManager.hideConfirmationToast();
+                    },
+                    () => { // onCancel
+                        UIManager.hideConfirmationToast();
+                    }
+                );
+            } else {
+                 UIManager.showSystemMessageInChat('Failed to generate reply.');
+            }
+        } catch(e) {
+             UIManager.showSystemMessageInChat('Error generating reply.');
         }
     }
 };
 
 
-// FIX: Added placeholder TasksApp object to resolve reference error.
 /**
  * Logic for the Tasks card.
  * @namespace
  */
 const TasksApp = {
+    state: {
+        tasks: [],
+        isLoading: true,
+    },
+    elements: {
+        container: null as HTMLElement | null,
+        list: null as HTMLElement | null,
+        form: null as HTMLFormElement | null,
+        titleInput: null as HTMLInputElement | null,
+        prioritySelect: null as HTMLSelectElement | null,
+    },
     /**
      * @param {HTMLElement} container - The card element.
      */
-    initialize(container) {
-        // This is a placeholder to fix the reference error.
+    async initialize(container) {
+        this.elements.container = container;
+        this.elements.list = container.querySelector('#task-list');
+        this.elements.form = container.querySelector('#add-task-form');
+        this.elements.titleInput = container.querySelector('#task-title-input');
+        this.elements.prioritySelect = container.querySelector('#task-priority-select');
+        
+        this.elements.form.addEventListener('submit', this.handleAddTask.bind(this));
+        
+        await this.fetchAndRenderTasks();
+    },
+
+    async fetchAndRenderTasks() {
+        this.state.isLoading = true;
+        this.render();
+        try {
+            const tasks = await BackendAPI.tasks.list();
+            this.state.tasks = tasks.sort((a, b) => Number(a.completed) - Number(b.completed)); // Show incomplete first
+        } catch (error) {
+            console.error("Failed to fetch tasks", error);
+            this.state.tasks = []; // Clear tasks on error
+        } finally {
+            this.state.isLoading = false;
+            this.render();
+        }
+    },
+    
+    async handleAddTask(e) {
+        e.preventDefault();
+        const title = this.elements.titleInput.value.trim();
+        const priority = this.elements.prioritySelect.value;
+        if (!title) return;
+
+        this.elements.titleInput.disabled = true;
+        try {
+            await BackendAPI.tasks.create(title, priority);
+            this.elements.form.reset();
+            await this.fetchAndRenderTasks();
+        } finally {
+            this.elements.titleInput.disabled = false;
+            this.elements.titleInput.focus();
+        }
+    },
+
+    async handleToggleTask(taskId) {
+        const task = this.state.tasks.find(t => t.id === taskId);
+        if (!task) return;
+        await BackendAPI.tasks.update(taskId, !task.completed);
+        await this.fetchAndRenderTasks();
+    },
+
+    async handleDeleteTask(taskId) {
+        if (confirm('Are you sure you want to delete this task?')) {
+            await BackendAPI.tasks.delete(taskId);
+            await this.fetchAndRenderTasks();
+        }
+    },
+
+    render() {
+        if (!this.elements.list) return;
+        const listEl = this.elements.list;
+        
+        if (this.state.isLoading) {
+            listEl.innerHTML = '<li class="no-tasks-message">Loading tasks...</li>';
+            return;
+        }
+
+        if (this.state.tasks.length === 0) {
+            listEl.innerHTML = '<li class="no-tasks-message">No tasks yet. Add one below!</li>';
+            return;
+        }
+
+        listEl.innerHTML = ''; // Clear previous
+        this.state.tasks.forEach(task => {
+            const item = document.createElement('li');
+            item.className = 'task-item';
+            item.classList.toggle('completed', task.completed);
+            item.dataset.priority = task.priority;
+
+            const checkbox = document.createElement('input');
+            checkbox.type = 'checkbox';
+            checkbox.className = 'task-checkbox';
+            checkbox.checked = task.completed;
+            checkbox.addEventListener('change', () => this.handleToggleTask(task.id));
+
+            const title = document.createElement('span');
+            title.className = 'task-title';
+            title.textContent = task.title;
+
+            const deleteBtn = document.createElement('button');
+            deleteBtn.className = 'delete-task-btn';
+            deleteBtn.innerHTML = '&times;';
+            deleteBtn.ariaLabel = `Delete task: ${task.title}`;
+            deleteBtn.addEventListener('click', () => this.handleDeleteTask(task.id));
+
+            item.appendChild(checkbox);
+            item.appendChild(title);
+            item.appendChild(deleteBtn);
+            listEl.appendChild(item);
+        });
+    },
+};
+
+/**
+ * Logic for the Notes card.
+ * @namespace
+ */
+const NotesApp = {
+    state: {
+        notes: [],
+        isLoading: true,
+    },
+    elements: {
+        list: null as HTMLElement | null,
+        form: null as HTMLFormElement | null,
+        contentInput: null as HTMLTextAreaElement | null,
+    },
+    async initialize(container) {
+        this.elements.list = container.querySelector('#notes-list');
+        this.elements.form = container.querySelector('#add-note-form');
+        this.elements.contentInput = container.querySelector('#note-content-input');
+
+        this.elements.form.addEventListener('submit', this.handleAddNote.bind(this));
+        await this.fetchAndRenderNotes();
+    },
+    async fetchAndRenderNotes() {
+        this.state.isLoading = true;
+        this.render();
+        try {
+            const notes = await BackendAPI.notes.list();
+            this.state.notes = notes.reverse(); // Show newest first
+        } catch (error) {
+            console.error("Failed to fetch notes", error);
+            this.state.notes = [];
+        } finally {
+            this.state.isLoading = false;
+            this.render();
+        }
+    },
+    async handleAddNote(e) {
+        e.preventDefault();
+        const content = this.elements.contentInput.value.trim();
+        if (!content) return;
+
+        this.elements.contentInput.disabled = true;
+        try {
+            await BackendAPI.notes.create(content);
+            this.elements.form.reset();
+            await this.fetchAndRenderNotes();
+        } finally {
+            this.elements.contentInput.disabled = false;
+            this.elements.contentInput.focus();
+        }
+    },
+    render() {
+        if (!this.elements.list) return;
+        const listEl = this.elements.list;
+
+        if (this.state.isLoading) {
+            listEl.innerHTML = '<li class="no-messages">Loading notes...</li>';
+            return;
+        }
+        if (this.state.notes.length === 0) {
+            listEl.innerHTML = '<li class="no-messages">No notes yet. Add one below.</li>';
+            return;
+        }
+
+        listEl.innerHTML = '';
+        this.state.notes.forEach(note => {
+            const item = document.createElement('li');
+            item.className = 'note-item';
+            item.textContent = note.content;
+            listEl.appendChild(item);
+        });
+    }
+};
+
+/**
+ * NEW: Logic for the Gadgets card.
+ * @namespace
+ */
+const GadgetsApp = {
+    async initialize(container) {
+        const contentArea = container.querySelector('#gadgets-content');
+        if (!contentArea) return;
+
+        // Fetch all data in parallel
+        try {
+            const [status, widgets, expenseSummary, activityLog] = await Promise.all([
+                BackendAPI.system.getStatus(),
+                BackendAPI.widgets.list(),
+                BackendAPI.expenses.getSummary(),
+                BackendAPI.activityLog.list(),
+            ]);
+            
+            contentArea.innerHTML = ''; // Clear loading message
+            
+            // Render widgets
+            this.renderSystemStatusWidget(contentArea, status);
+            this.renderTrafficLightWidget(contentArea, widgets);
+            this.renderExpenseChartWidget(contentArea, expenseSummary);
+            this.renderActivityLogWidget(contentArea, activityLog);
+
+        } catch (error) {
+            console.error("Failed to load gadgets data", error);
+            contentArea.innerHTML = '<div class="card-placeholder-content"><p>Failed to load gadgets. The backend might be throwing a tantrum.</p></div>';
+        }
+    },
+
+    renderSystemStatusWidget(container, status) {
+        const widget = document.createElement('div');
+        widget.className = 'widget';
+        
+        const uptime = new Date(status.serverUptime * 1000).toISOString().substr(11, 8);
+
+        widget.innerHTML = `
+            <div class="widget-header"><h3 class="widget-title">System Status</h3></div>
+            <div class="widget-content">
+                <div class="system-status-grid">
+                    <div class="status-metric">
+                        <div class="status-metric-value">${uptime}</div>
+                        <div class="status-metric-label">Uptime</div>
+                    </div>
+                     <div class="status-metric">
+                        <div class="status-metric-value">${status.avgGeminiResponseTime}<small>ms</small></div>
+                        <div class="status-metric-label">Avg AI Response</div>
+                    </div>
+                     <div class="status-metric">
+                        <div class="status-metric-value">${status.tasksPending}</div>
+                        <div class="status-metric-label">Pending Tasks</div>
+                    </div>
+                     <div class="status-metric">
+                        <div class="status-metric-value">${status.inboxHistoryCount}</div>
+                        <div class="status-metric-label">Replies Sent</div>
+                    </div>
+                </div>
+            </div>
+        `;
+        container.appendChild(widget);
+    },
+    
+    renderTrafficLightWidget(container, widgets) {
+        const widget = document.createElement('div');
+        widget.className = 'widget';
+        widget.innerHTML = `<div class="widget-header"><h3 class="widget-title">System Health</h3></div>
+        <div class="widget-content traffic-light-container"></div>`;
+
+        const content = widget.querySelector('.traffic-light-container');
+        widgets.forEach(item => {
+            if (item.type === 'traffic-light') {
+                const lightEl = document.createElement('div');
+                lightEl.className = 'traffic-light-item';
+                lightEl.innerHTML = `
+                    <div class="traffic-light-indicator ${item.status}"></div>
+                    <span class="traffic-light-label">${item.label}</span>
+                `;
+                content.appendChild(lightEl);
+            }
+        });
+        container.appendChild(widget);
+    },
+
+    renderExpenseChartWidget(container, summary) {
+        if (summary.length === 0) return;
+        
+        const widget = document.createElement('div');
+        widget.className = 'widget';
+        widget.innerHTML = `<div class="widget-header"><h3 class="widget-title">Expense Summary</h3></div>
+        <div class="widget-content expense-chart"></div>`;
+        
+        const content = widget.querySelector('.expense-chart');
+        const maxTotal = Math.max(...summary.map(item => item.total));
+
+        summary.forEach(item => {
+            const percentage = (item.total / maxTotal) * 100;
+            const itemEl = document.createElement('div');
+            itemEl.className = 'expense-bar-item';
+            itemEl.innerHTML = `
+                <span class="expense-bar-label" title="${item.category}">${item.category}</span>
+                <div class="expense-bar-container">
+                    <div class="expense-bar" style="width: ${percentage}%"></div>
+                </div>
+                <span class="expense-bar-amount">$${item.total.toLocaleString()}</span>
+            `;
+            content.appendChild(itemEl);
+        });
+        container.appendChild(widget);
+    },
+
+    renderActivityLogWidget(container, log) {
+        const widget = document.createElement('div');
+        widget.className = 'widget';
+        widget.innerHTML = `<div class="widget-header"><h3 class="widget-title">Activity Log</h3></div>
+        <div class="widget-content">
+            <ul class="activity-log-list"></ul>
+        </div>`;
+        
+        const listEl = widget.querySelector('.activity-log-list');
+        if (log.length === 0) {
+            listEl.innerHTML = '<li class="no-messages">No recent activity. Too quiet...</li>';
+        } else {
+            log.slice(0, 10).forEach(entry => { // Show last 10
+                 const itemEl = document.createElement('li');
+                 itemEl.className = 'activity-log-item';
+                 itemEl.innerHTML = `<span class="activity-log-type">${entry.type.replace(/_/g, ' ')}</span>`;
+                 listEl.appendChild(itemEl);
+            });
+        }
+        container.appendChild(widget);
     }
 };
 
@@ -1150,40 +1639,13 @@ const TasksApp = {
  * @namespace
  */
 const SettingsApp = {
-    state: {
-        settings: { theme: 'dark' },
-        apiKeys: [],
-    },
-    keys: {
-        settings: 'assistant-settings',
-        apiKeys: 'assistant-api-keys',
-    },
-
-    initialize(container) {
-        this.loadState();
-
-        this.initializeThemeSwitcher(container);
+    async initialize(container) {
+        const settings = await BackendAPI.settings.get();
+        this.initializeThemeSwitcher(container, settings.theme);
         this.initializeApiKeyManager(container);
     },
 
-    saveState() {
-        localStorage.setItem(this.keys.settings, JSON.stringify(this.state.settings));
-        localStorage.setItem(this.keys.apiKeys, JSON.stringify(this.state.apiKeys));
-    },
-
-    loadState() {
-        const savedSettings = localStorage.getItem(this.keys.settings);
-        const savedApiKeys = localStorage.getItem(this.keys.apiKeys);
-
-        if (savedSettings) {
-            this.state.settings = JSON.parse(savedSettings);
-        }
-        if (savedApiKeys) {
-            this.state.apiKeys = JSON.parse(savedApiKeys);
-        }
-    },
-
-    initializeThemeSwitcher(container) {
+    initializeThemeSwitcher(container, currentTheme) {
         const themeButtons = container.querySelectorAll('.theme-btn');
 
         const applyTheme = (theme) => {
@@ -1194,88 +1656,78 @@ const SettingsApp = {
         };
 
         themeButtons.forEach(button => {
-            button.addEventListener('click', () => {
+            button.addEventListener('click', async () => {
                 const theme = button.getAttribute('data-theme');
                 if (theme) {
-                    this.state.settings.theme = theme;
                     applyTheme(theme);
-                    this.saveState();
+                    await BackendAPI.settings.update({ theme });
                 }
             });
         });
 
-        applyTheme(this.state.settings.theme || 'dark');
+        applyTheme(currentTheme);
     },
 
-    initializeApiKeyManager(container) {
-        const listEl = container.querySelector('#api-keys-list');
-        const form = container.querySelector('#add-api-key-form');
+    async initializeApiKeyManager(container) {
+        const listEl = container.querySelector('#api-keys-list') as HTMLElement;
+        const form = container.querySelector('#add-api-key-form') as HTMLFormElement;
         const nameInput = container.querySelector('#api-key-name-input') as HTMLInputElement;
         const valueInput = container.querySelector('#api-key-value-input') as HTMLInputElement;
 
-        form.addEventListener('submit', (e) => {
+        const refreshKeys = async () => {
+            const keys = await BackendAPI.apiKeys.list();
+            this.renderApiKeys(listEl, keys, refreshKeys);
+        };
+
+        form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const name = nameInput.value.trim();
             const value = valueInput.value.trim();
-            if (name && value) {
-                this.addApiKey(name, value);
-                nameInput.value = '';
-                valueInput.value = '';
+            if (!name || !value) {
+                alert("Please provide both a name and a value for the API key.");
+                return;
             }
+
+            await BackendAPI.apiKeys.create(name, value);
+            form.reset();
+            await refreshKeys();
         });
 
-        this.renderApiKeys(listEl);
+        await refreshKeys(); // Initial render
     },
 
-    renderApiKeys(listEl) {
+    renderApiKeys(listEl, apiKeys, refreshCallback) {
         listEl.innerHTML = '';
-        if (this.state.apiKeys.length === 0) {
-            listEl.innerHTML = '<li class="no-messages">No API keys added.</li>';
+        if (apiKeys.length === 0) {
+            listEl.innerHTML = '<li class="no-messages">No API keys added. Keys are stored in your browser\'s local storage.</li>';
             return;
         }
-        this.state.apiKeys.forEach(apiKey => {
+        apiKeys.forEach(apiKey => {
             const item = document.createElement('li');
             item.className = 'api-key-item';
             
             const nameEl = document.createElement('strong');
             nameEl.textContent = apiKey.name;
             
-            const valueEl = document.createElement('span');
-            // Show only a portion of the key for display purposes
-            valueEl.textContent = `${apiKey.value.substring(0, 4)}...${apiKey.value.slice(-4)}`;
-            
+            const valuePreview = document.createElement('span');
+            valuePreview.className = 'api-key-preview';
+            valuePreview.textContent = `...${apiKey.value.slice(-4)}`;
+
             const deleteBtn = document.createElement('button');
             deleteBtn.innerHTML = '&times;';
             deleteBtn.ariaLabel = `Delete ${apiKey.name} key`;
-            deleteBtn.addEventListener('click', () => {
-                if (confirm(`Are you sure you want to delete the API key for "${apiKey.name}"?`)) {
-                    this.deleteApiKey(apiKey.id);
+            deleteBtn.addEventListener('click', async () => {
+                if (confirm(`Are you sure you want to delete the "${apiKey.name}" key? This cannot be undone.`)) {
+                    await BackendAPI.apiKeys.delete(apiKey.id);
+                    await refreshCallback();
                 }
             });
 
-            const leftContainer = document.createElement('div');
-            leftContainer.style.display = 'flex';
-            leftContainer.style.flexDirection = 'column';
-            leftContainer.appendChild(nameEl);
-            leftContainer.appendChild(valueEl);
-
-            item.appendChild(leftContainer);
+            item.appendChild(nameEl);
+            item.appendChild(valuePreview);
             item.appendChild(deleteBtn);
             listEl.appendChild(item);
         });
-    },
-
-    addApiKey(name, value) {
-        const newKey = { id: `key-${Date.now()}`, name, value };
-        this.state.apiKeys.push(newKey);
-        this.saveState();
-        this.renderApiKeys(document.querySelector('#card-settings #api-keys-list'));
-    },
-
-    deleteApiKey(id) {
-        this.state.apiKeys = this.state.apiKeys.filter(key => key.id !== id);
-        this.saveState();
-        this.renderApiKeys(document.querySelector('#card-settings #api-keys-list'));
     }
 };
 
@@ -1283,5 +1735,5 @@ const SettingsApp = {
 // --- Global Initialization ---
 document.addEventListener('DOMContentLoaded', () => {
     UIManager.initialize();
-    AIController.initialize();
+    BackendAPI.initialize();
 });

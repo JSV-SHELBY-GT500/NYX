@@ -112,7 +112,16 @@
                         <!-- Chat history will be loaded here by JS -->
                     </main>
                     <footer>
+                         <div id="chat-suggestions-container">
+                            <!-- Intelligent suggestions will be rendered here by JS -->
+                        </div>
                         <form id="chat-form" aria-label="Chat input form">
+                            <button type="button" id="mic-btn" aria-label="Use microphone">
+                               <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M12 2.25c-2.42 0-4.385 1.965-4.385 4.385v5.25a4.385 4.385 0 008.77 0v-5.25A4.385 4.385 0 0012 2.25zM10.115 18.293a.75.75 0 000 1.06l.44.44a.75.75 0 001.06 0l.44-.44a.75.75 0 000-1.06l-1.5-1.5a.75.75 0 00-1.06 0l-1.5 1.5zM12 17.25a.75.75 0 01.75.75v2.25a.75.75 0 01-1.5 0V18a.75.75 0 01.75-.75zM14.943 18.293a.75.75 0 001.06 0l1.5-1.5a.75.75 0 00-1.06-1.06l-.44.44a.75.75 0 000 1.06l.44.44z"></path>
+                                  <path fill-rule="evenodd" d="M16.5 11.635v-5.25a4.5 4.5 0 00-9 0v5.25a6 6 0 00-1.5 11.264.75.75 0 001.5 0 4.5 4.5 0 018.998 0 .75.75 0 001.5 0A6 6 0 0016.5 11.635zM12 21a3 3 0 01-3-3V13.5a3 3 0 116 0v4.5a3 3 0 01-3 3z" clip-rule="evenodd"></path>
+                                </svg>
+                            </button>
                             <textarea id="chat-input" placeholder="Ask me anything..." aria-label="Message input" rows="1"></textarea>
                             <button type="submit" id="send-btn" aria-label="Send message" disabled>
                                 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" width="24" height="24">
@@ -157,20 +166,17 @@
                     <div class="card-controls"></div>
                 </header>
                 <div class="card-content" id="tasks-content">
-                    <div class="task-controls">
-                        <button id="sort-by-priority-btn">Sort by Priority</button>
-                    </div>
-                    <ul id="task-list"></ul>
-                    <form id="add-task-form" aria-label="Add new task form">
-                        <input type="text" id="task-title-input" placeholder="New task..." required aria-label="Task title">
-                        <div class="form-row">
-                            <select id="task-priority-select" aria-label="Task priority">
-                                <option value="high">High Priority</option>
-                                <option value="medium" selected>Medium Priority</option>
-                                <option value="low">Low Priority</option>
-                            </select>
-                            <button type="submit">Add</button>
-                        </div>
+                    <ul class="task-list-container" id="task-list">
+                        <!-- Tasks will be rendered here by JS -->
+                    </ul>
+                    <form class="task-add-form" id="add-task-form" aria-label="Add new task form">
+                        <input type="text" id="task-title-input" placeholder="Add a new task..." required aria-label="Task title">
+                        <select id="task-priority-select" aria-label="Task priority">
+                            <option value="high">High</option>
+                            <option value="medium" selected>Medium</option>
+                            <option value="low">Low</option>
+                        </select>
+                        <button type="submit">Add</button>
                     </form>
                 </div>
             </div>
@@ -192,7 +198,7 @@
                     <hr class="setting-divider">
                     <div class="setting-group vertical">
                         <label>API Key Management</label>
-                        <p class="setting-description">Manage keys for external services. Stored locally.</p>
+                        <p class="setting-description">Manage keys for external services. Keys are stored securely in your browser's local storage.</p>
                         <ul id="api-keys-list">
                             <!-- API keys will be rendered here by JS -->
                         </ul>
@@ -205,14 +211,21 @@
                 </div>
             </div>
         </template>
-        <!-- Add other card templates here -->
         <template id="template-card-notes">
             <div class="card" id="card-notes" data-icon-id="notes-icon">
                 <header class="card-header">
                     <h2>Notes</h2>
                     <div class="card-controls"></div>
                 </header>
-                <div class="card-placeholder-content"><p>Your Notes</p></div>
+                <div class="card-content" id="notes-content">
+                    <ul class="notes-list-container" id="notes-list">
+                        <!-- Notes rendered by JS -->
+                    </ul>
+                    <form class="note-add-form" id="add-note-form">
+                        <textarea id="note-content-input" placeholder="Jot something down..." required></textarea>
+                        <button type="submit">Save Note</button>
+                    </form>
+                </div>
             </div>
         </template>
         <template id="template-card-gadgets">
@@ -221,7 +234,12 @@
                     <h2>Gadgets</h2>
                     <div class="card-controls"></div>
                 </header>
-                <div class="card-placeholder-content"><p>Manage Your Gadgets</p></div>
+                <div class="card-content" id="gadgets-content">
+                    <!-- Widgets will be dynamically rendered here -->
+                     <div class="card-placeholder-content">
+                        <p>Loading gadgets... if this takes too long, the backend might be napping.</p>
+                    </div>
+                </div>
             </div>
         </template>
     </div>
@@ -313,7 +331,7 @@
         </svg>
          <svg id="settings-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round">
            <path stroke="none" d="M0 0h24v24H0z" fill="none"></path>
-           <path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path>
+           <path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 -1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path>
            <circle cx="12" cy="12" r="3"></circle>
         </svg>
         <svg id="settings-gear-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -323,12 +341,15 @@
     </div>
 
     <script type="importmap">
-    {
-        "imports": {
-            "@google/genai": "https://esm.sh/@google/genai@^0.12.0"
-        }
-    }
-    </script>
+{
+  "imports": {
+    "@google/genai": "https://esm.sh/@google/genai@^0.12.0",
+    "express": "https://aistudiocdn.com/express@^5.1.0",
+    "cors": "https://aistudiocdn.com/cors@^2.8.5",
+    "dotenv": "https://aistudiocdn.com/dotenv@^17.2.2"
+  }
+}
+</script>
     <script type="module" src="index.js"></script>
 </body>
 </html>
